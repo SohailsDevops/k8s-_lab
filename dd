@@ -1,0 +1,9 @@
+sudo rm -f /usr/local/bin/kubectl
+Download matching version (1.35)
+curl -LO https://dl.k8s.io/release/v1.35.1/bin/linux/amd64/kubectl
+chmod +x kubectl
+sudo mv kubectl /usr/local/bin/
+
+Verify:
+
+kubectl version --short
