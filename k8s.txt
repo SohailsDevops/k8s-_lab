@@ -1,0 +1,267 @@
+🟢 1️⃣ CONFIGMAP
+Step 1: Create ConfigMap
+
+They want:
+
+Name: fresco-config
+
+Key: SERVER_URL
+
+Value: https://www.fresco.me
+
+Run:
+
+kubectl create configmap fresco-config \
+--from-literal=SERVER_URL=https://www.fresco.me
+
+Verify:
+
+kubectl get configmap
+kubectl describe configmap fresco-config
+
+If you don’t see it, check your spelling. Kubernetes is unforgiving.
+
+Step 2: Create Pod Using That ConfigMap
+
+Create fresco-nginx-pod.yaml:
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: fresco-nginx-pod
+spec:
+  containers:
+  - name: fresco-nginx-container
+    image: nginx
+    env:
+    - name: SERVER_URL_ENV
+      valueFrom:
+        configMapKeyRef:
+          name: fresco-config
+          key: SERVER_URL
+
+Apply:
+
+kubectl apply -f fresco-nginx-pod.yaml
+
+Test:
+
+kubectl exec -it fresco-nginx-pod -- sh -c "env | grep SERVER_URL_ENV"
+
+Expected output:
+
+SERVER_URL_ENV=https://www.fresco.me
+
+If it’s empty, you messed up indentation. YAML is allergic to laziness.
+
+🔵 2️⃣ SECRETS
+Step 1: Create Secret
+
+They want:
+
+user: admin
+pass: pass
+
+Run:
+
+kubectl create secret generic fresco-secret \
+--from-literal=user=admin \
+--from-literal=pass=pass
+
+Verify:
+
+kubectl get secret
+kubectl describe secret fresco-secret
+Step 2: Mount Secret at /etc/test
+
+Modify pod YAML. Add inside container:
+
+volumeMounts:
+- name: fresco-secret-volume
+  mountPath: /etc/test
+  readOnly: true
+
+Add under spec::
+
+volumes:
+- name: fresco-secret-volume
+  secret:
+    secretName: fresco-secret
+
+Now recreate pod:
+
+kubectl delete pod fresco-nginx-pod
+kubectl apply -f fresco-nginx-pod.yaml
+
+Test:
+
+kubectl exec -it fresco-nginx-pod -- sh -c "cat /etc/test/*"
+
+You’ll see base64 encoded values.
+
+Decode:
+
+kubectl exec -it fresco-nginx-pod -- sh -c "cat /etc/test/* | base64 -d"
+
+Should show:
+
+admin
+pass
+
+If not, something is mounted wrong.
+
+🟡 3️⃣ PERSISTENT VOLUME
+Step 1: Create PV
+
+Create fresco-pv.yaml
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: fresco-pv
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 100Mi
+  accessModes:
+    - ReadWriteOnce
+  hostPath:
+    path: /tmp/fresco
+
+Apply:
+
+kubectl apply -f fresco-pv.yaml
+kubectl get pv
+Step 2: Create PVC (50Mi)
+
+Create fresco-pvc.yaml
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fresco-pvc
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 50Mi
+
+Apply:
+
+kubectl apply -f fresco-pvc.yaml
+kubectl get pvc
+
+Status must be:
+
+Bound
+
+If it’s Pending, your storageClassName mismatch is mocking you.
+
+Step 3: Mount PVC in Pod
+
+Add inside container:
+
+volumeMounts:
+- name: fresco-pvc-volume
+  mountPath: /usr/share/nginx/html
+
+Add under volumes:
+
+- name: fresco-pvc-volume
+  persistentVolumeClaim:
+    claimName: fresco-pvc
+
+Recreate pod again.
+
+Debug if needed:
+
+kubectl describe pod fresco-nginx-pod
+🔴 4️⃣ RBAC SECTION
+
+Now the fun part.
+
+Step 1: Create Namespace
+kubectl create namespace dev
+Step 2: Generate Key
+openssl genrsa -out emp.key 2048
+Step 3: Create CSR
+openssl req -new -key emp.key -out emp.csr -subj "/CN=emp/O=dev"
+Step 4: Create CSR Object in K8s
+
+Encode:
+
+cat emp.csr | base64 | tr -d '\n'
+
+Create emp-csr.yaml:
+
+apiVersion: certificates.k8s.io/v1
+kind: CertificateSigningRequest
+metadata:
+  name: emp
+spec:
+  request: <PASTE_BASE64>
+  signerName: kubernetes.io/kube-apiserver-client
+  usages:
+  - client auth
+
+Apply and approve:
+
+kubectl apply -f emp-csr.yaml
+kubectl certificate approve emp
+
+Extract cert:
+
+kubectl get csr emp -o jsonpath='{.status.certificate}' | base64 -d > emp.crt
+Step 5: Create Context
+kubectl config set-credentials emp \
+--client-certificate=emp.crt \
+--client-key=emp.key
+
+kubectl config set-context dev-ctx \
+--cluster=minikube \
+--namespace=dev \
+--user=emp
+Step 6: Create Role
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: emp-role
+  namespace: dev
+rules:
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "list"]
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "list"]
+
+Apply it.
+
+Step 7: Bind Role
+kubectl create rolebinding emp-bind \
+--role=emp-role \
+--user=emp \
+--namespace=dev
+Step 8: Test
+
+Switch context:
+
+kubectl config use-context dev-ctx
+
+Deploy nginx:
+
+kubectl run nginx --image=nginx -n dev
+
+Check:
+
+kubectl get pods -n dev
+
+Try default namespace:
+
+kubectl get pods -n default
+
+You should get forbidden.
+
+That means RBAC is working properly.
